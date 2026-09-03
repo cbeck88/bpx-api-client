@@ -1,5 +1,5 @@
 use bpx_api_types::order::{
-    CancelOpenOrdersPayload, CancelOrderPayload, ExecuteOrderPayload, Order,
+    BatchOrderResponse, CancelOpenOrdersPayload, CancelOrderPayload, ExecuteOrderPayload, Order,
 };
 
 use crate::BpxClient;
@@ -72,6 +72,16 @@ impl BpxClient {
         }
         let res = self.get(url).await?;
         Self::json_with_context(res).await
+    }
+
+    /// Executes a new order with the given payload.
+    pub async fn execute_orders(
+        &self,
+        payload: Vec<ExecuteOrderPayload>,
+    ) -> Result<Vec<BatchOrderResponse>> {
+        let endpoint = self.base_url.join(API_ORDERS)?;
+        let res = self.post(endpoint, payload).await?;
+        res.json().await.map_err(Into::into)
     }
 
     /// Cancels all open orders matching the specified payload.

@@ -48,13 +48,14 @@ use routes::{
     order::{API_ORDER, API_ORDERS},
     rfq::{API_RFQ, API_RFQ_QUOTE},
     user::API_USER_2FA,
+    vault::{API_VAULT_MINT, API_VAULT_MINTS_HISTORY, API_VAULT_REDEEM, API_VAULT_REDEEMS_HISTORY},
 };
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     borrow::Cow,
     collections::BTreeMap,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub mod error;
@@ -206,31 +207,32 @@ impl BpxClient {
     pub async fn get<U: IntoUrl>(&self, url: U) -> Result<Response> {
         let req = self.build_and_maybe_sign_request::<(), _>(url, Method::GET, None)?;
         tracing::debug!(?req, "GET request");
-        let res = self.client.execute(req).await?;
-        Self::process_response(res).await
+        self.execute(req).await
     }
 
     /// Sends a POST request with a JSON payload to the specified URL and signs it.
     pub async fn post<P: Serialize, U: IntoUrl>(&self, url: U, payload: P) -> Result<Response> {
         let req = self.build_and_maybe_sign_request(url, Method::POST, Some(&payload))?;
         tracing::debug!(?req, "POST request");
-        let res = self.client.execute(req).await?;
-        Self::process_response(res).await
+        self.execute(req).await
     }
 
     /// Sends a DELETE request with a JSON payload to the specified URL and signs it.
     pub async fn delete<P: Serialize, U: IntoUrl>(&self, url: U, payload: P) -> Result<Response> {
         let req = self.build_and_maybe_sign_request(url, Method::DELETE, Some(&payload))?;
         tracing::debug!(?req, "DELETE request");
-        let res = self.client.execute(req).await?;
-        Self::process_response(res).await
+        self.execute(req).await
     }
 
     /// Sends a PATCH request with a JSON payload to the specified URL and signs it.
     pub async fn patch<P: Serialize, U: IntoUrl>(&self, url: U, payload: P) -> Result<Response> {
         let req = self.build_and_maybe_sign_request(url, Method::PATCH, Some(&payload))?;
         tracing::debug!(?req, "PATCH request");
-        let res = self.client.execute(req).await?;
+        self.execute(req).await
+    }
+
+    pub async fn execute(&self, request: Request) -> Result<Response> {
+        let res = self.client.execute(request).await?;
         Self::process_response(res).await
     }
 
@@ -243,6 +245,10 @@ impl BpxClient {
     /// Returns a reference to the underlying HTTP client.
     pub const fn client(&self) -> &reqwest::Client {
         &self.client
+    }
+
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
     }
 }
 
@@ -271,6 +277,7 @@ impl BpxClient {
             API_ORDER if method == Method::POST => "orderExecute",
             API_ORDER if method == Method::DELETE => "orderCancel",
             API_ORDERS if method == Method::GET => "orderQueryAll",
+            API_ORDERS if method == Method::POST => "orderExecute",
             API_ORDERS if method == Method::DELETE => "orderCancelAll",
             API_RFQ if method == Method::POST => "rfqSubmit",
             API_RFQ_QUOTE if method == Method::POST => "quoteSubmit",
@@ -287,6 +294,11 @@ impl BpxClient {
             API_ACCOUNT if method == Method::PATCH => "accountUpdate",
             API_ACCOUNT_CONVERT_DUST if method == Method::POST => "convertDust",
             API_FILLS_HISTORY if method == Method::GET => "fillHistoryQueryAll",
+            API_VAULT_MINT if method == Method::POST => "vaultMint",
+            API_VAULT_REDEEM if method == Method::POST => "vaultRedeemRequest",
+            API_VAULT_REDEEM if method == Method::DELETE => "vaultRedeemCancel",
+            API_VAULT_MINTS_HISTORY if method == Method::GET => "vaultMintHistoryQueryAll",
+            API_VAULT_REDEEMS_HISTORY if method == Method::GET => "vaultRedeemHistoryQueryAll",
             _ => {
                 let req = self.client().request(method, url);
                 if let Some(payload) = payload {
@@ -297,39 +309,36 @@ impl BpxClient {
             }
         };
 
-        let Some(signing_key) = &self.signing_key else {
-            return Err(Error::NotAuthenticated);
-        };
+        self.build_signed_request(url, method, instruction, payload)
+    }
+
+    /// Builds an authenticated request with signing headers.
+    ///
+    /// Use this to create signed requests for custom endpoints. The `instruction`
+    /// must match the Backpack API's expected instruction string for the endpoint.
+    pub fn build_signed_request<P: Serialize, U: IntoUrl>(
+        &self,
+        url: U,
+        method: Method,
+        instruction: &str,
+        payload: Option<&P>,
+    ) -> Result<Request> {
+        let url = url.into_url()?;
+
+        let signing_key = self.signing_key.as_ref().ok_or(Error::NotAuthenticated)?;
 
         let query_params = url
             .query_pairs()
             .collect::<BTreeMap<Cow<'_, str>, Cow<'_, str>>>();
-        let body_params = if let Some(payload) = payload {
-            let s = serde_json::to_value(payload)?;
-            match s {
-                Value::Object(map) => map
-                    .into_iter()
-                    .map(|(k, v)| (k, v.to_string()))
-                    .collect::<BTreeMap<_, _>>(),
-                _ => {
-                    return Err(Error::InvalidRequest(
-                        "payload must be a JSON object".into(),
-                    ));
-                }
-            }
+
+        let mut signee = if let Some(payload) = payload {
+            let value = serde_json::to_value(payload)?;
+            build_signee_query_and_payload(instruction, value, &query_params)?
         } else {
-            BTreeMap::new()
+            build_signee_query(instruction, &query_params)
         };
 
         let timestamp = now_millis();
-        let mut signee = format!("instruction={instruction}");
-        for (k, v) in query_params {
-            signee.push_str(&format!("&{k}={v}"));
-        }
-        for (k, v) in body_params {
-            let v = v.trim_start_matches('"').trim_end_matches('"');
-            signee.push_str(&format!("&{k}={v}"));
-        }
         signee.push_str(&format!("&timestamp={timestamp}&window={DEFAULT_WINDOW}"));
         tracing::debug!("signee: {}", signee);
 
@@ -355,12 +364,53 @@ impl BpxClient {
     }
 }
 
+fn build_signee_query_and_payload(
+    instruction: &str,
+    payload: serde_json::Value,
+    query_params: &BTreeMap<Cow<'_, str>, Cow<'_, str>>,
+) -> Result<String> {
+    match payload {
+        Value::Object(map) => {
+            let body_params = map
+                .into_iter()
+                .map(|(k, v)| (k, v.to_string()))
+                .collect::<BTreeMap<_, _>>();
+            let mut signee = build_signee_query(instruction, query_params);
+            for (k, v) in body_params {
+                let v = v.trim_start_matches('"').trim_end_matches('"');
+                signee.push_str(&format!("&{k}={v}"));
+            }
+            Ok(signee)
+        }
+        Value::Array(array) => array
+            .into_iter()
+            .map(|item| build_signee_query_and_payload(instruction, item, query_params))
+            .collect::<Result<Vec<_>>>()
+            .map(|parts| parts.join("&")),
+        _ => Err(Error::InvalidRequest(
+            "payload must be a JSON object".into(),
+        )),
+    }
+}
+
+fn build_signee_query(
+    instruction: &str,
+    query_params: &BTreeMap<Cow<'_, str>, Cow<'_, str>>,
+) -> String {
+    let mut signee = format!("instruction={instruction}");
+    for (k, v) in query_params {
+        signee.push_str(&format!("&{k}={v}"));
+    }
+    signee
+}
+
 #[derive(Debug, Default)]
 pub struct BpxClientBuilder {
     base_url: Option<String>,
     ws_url: Option<String>,
     secret: Option<String>,
     headers: Option<BpxHeaders>,
+    timeout: Option<u64>,
 }
 
 impl BpxClientBuilder {
@@ -421,6 +471,19 @@ impl BpxClientBuilder {
         self
     }
 
+    /// Sets a custom Timeout for the underlying http client
+    /// If not set, a default of 30 seconds is used.
+    ///
+    /// # Arguments
+    /// * `timeout` - The timeout in seconds
+    ///
+    /// # Returns
+    /// * `Self` - The updated builder instance
+    pub fn timeout(mut self, timeout: u64) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// Builds the `BpxClient` instance with the configured parameters.
     ///
     /// # Returns
@@ -466,6 +529,7 @@ impl BpxClientBuilder {
             client: reqwest::Client::builder()
                 .user_agent(API_USER_AGENT)
                 .default_headers(header_map)
+                .timeout(Duration::from_secs(self.timeout.unwrap_or(30)))
                 .build()?,
         };
 

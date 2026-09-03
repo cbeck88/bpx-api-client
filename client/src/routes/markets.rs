@@ -1,5 +1,6 @@
 use bpx_api_types::markets::{
-    Asset, FundingRate, Kline, MarkPrice, Market, OrderBookDepth, OrderBookDepthLimit, Ticker,
+    Asset, FundingRate, Kline, MarkPrice, Market, OrderBookDepth, OrderBookDepthLimit, Security,
+    Ticker,
 };
 
 use crate::BpxClient;
@@ -13,6 +14,7 @@ const API_DEPTH: &str = "/api/v1/depth";
 const API_KLINES: &str = "/api/v1/klines";
 const API_FUNDING: &str = "/api/v1/fundingRates";
 const API_MARK_PRICES: &str = "/api/v1/markPrices";
+const API_SECURITIES: &str = "/api/v1/securities";
 
 impl BpxClient {
     /// Fetches available assets and their associated tokens.
@@ -72,6 +74,13 @@ impl BpxClient {
         url.query_pairs_mut().append_pair("symbol", symbol);
         let res = self.get(url).await?;
         Self::json_with_context(res).await
+    }
+
+    /// Retrieves tradable securities.
+    pub async fn get_securities(&self) -> Result<Vec<Security>> {
+        let url = self.base_url.join(API_SECURITIES)?;
+        let res = self.get(url).await?;
+        res.json().await.map_err(Into::into)
     }
 
     /// Fetches historical K-line (candlestick) data for a given symbol and interval.

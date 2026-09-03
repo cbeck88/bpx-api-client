@@ -2,7 +2,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use crate::order::{OrderStatus, Side};
+use crate::order::{OrderStatus, Side, SystemOrderType};
 
 #[derive(
     Debug, Display, Clone, Copy, Serialize, Deserialize, Default, EnumString, PartialEq, Eq, Hash,
@@ -106,6 +106,8 @@ pub enum RequestForQuoteUpdate {
         order_status: OrderStatus,
         #[serde(rename = "T")]
         timestamp: i64,
+        #[serde(rename = "o", default)]
+        system_order_type: Option<SystemOrderType>,
     },
     RfqRefreshed {
         #[serde(rename = "E")]
@@ -130,6 +132,8 @@ pub enum RequestForQuoteUpdate {
         order_status: OrderStatus,
         #[serde(rename = "T")]
         timestamp: i64,
+        #[serde(rename = "o", default)]
+        system_order_type: Option<SystemOrderType>,
     },
     RfqAccepted {
         #[serde(rename = "E")]
@@ -154,6 +158,8 @@ pub enum RequestForQuoteUpdate {
         order_status: OrderStatus,
         #[serde(rename = "T")]
         timestamp: i64,
+        #[serde(rename = "o", default)]
+        system_order_type: Option<SystemOrderType>,
     },
     RfqCancelled {
         #[serde(rename = "E")]
@@ -174,6 +180,34 @@ pub enum RequestForQuoteUpdate {
         submission_time: i64,
         #[serde(rename = "W")]
         expiry_time: i64,
+        #[serde(rename = "X")]
+        order_status: OrderStatus,
+        #[serde(rename = "T")]
+        timestamp: i64,
+        #[serde(rename = "o", default)]
+        system_order_type: Option<SystemOrderType>,
+    },
+    // Sent to quoters. Deferred settlement RFQs only.
+    RfqAcceptedBinding {
+        #[serde(rename = "E")]
+        event_time: i64,
+        #[serde(rename = "R")]
+        rfq_id: u64,
+        #[serde(rename = "u")]
+        quote_id: u64,
+        #[serde(rename = "C", skip_serializing_if = "Option::is_none")]
+        client_id: Option<u32>,
+        #[serde(rename = "s")]
+        symbol: String,
+        /// Side of the taker.
+        #[serde(rename = "S", skip_serializing_if = "Option::is_none")]
+        side: Option<Side>,
+        #[serde(rename = "q", skip_serializing_if = "Option::is_none")]
+        quantity: Option<Decimal>,
+        #[serde(rename = "Q", skip_serializing_if = "Option::is_none")]
+        quote_quantity: Option<Decimal>,
+        #[serde(rename = "p", skip_serializing_if = "Option::is_none")]
+        price: Option<Decimal>,
         #[serde(rename = "X")]
         order_status: OrderStatus,
         #[serde(rename = "T")]
@@ -262,6 +296,8 @@ pub enum RequestForQuoteUpdate {
         order_status: OrderStatus,
         #[serde(rename = "T")]
         timestamp: i64,
+        #[serde(rename = "o", default)]
+        system_order_type: Option<SystemOrderType>,
     },
 }
 
@@ -305,6 +341,8 @@ pub struct RequestForQuote {
     pub status: OrderStatus,
     pub execution_mode: RfqExecutionMode,
     pub created_at: i64,
+    #[serde(default)]
+    pub system_order_type: Option<SystemOrderType>,
 }
 
 impl QuotePayload {
@@ -344,5 +382,41 @@ impl QuotePayload {
     pub fn with_auto_borrow_repay(mut self, auto_borrow_repay: bool) -> Self {
         self.auto_borrow_repay = Some(auto_borrow_repay);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfq_active_without_system_order_type() {
+        let data = r#"{"e":"rfqActive","E":1234567890,"R":123,"s":"BTC_USDC","q":"1.5","w":1234567890,"W":1234567899,"X":"New","T":1234567890}"#;
+        let update: RequestForQuoteUpdate = serde_json::from_str(data).unwrap();
+        match update {
+            RequestForQuoteUpdate::RfqActive {
+                system_order_type, ..
+            } => {
+                assert!(system_order_type.is_none());
+            }
+            _ => panic!("Expected RfqActive"),
+        }
+    }
+
+    #[test]
+    fn rfq_active_with_system_order_type() {
+        let data = r#"{"e":"rfqActive","E":1234567890,"R":123,"s":"BTC_USDC","q":"1.5","w":1234567890,"W":1234567899,"X":"New","T":1234567890,"o":"CollateralConversion"}"#;
+        let update: RequestForQuoteUpdate = serde_json::from_str(data).unwrap();
+        match update {
+            RequestForQuoteUpdate::RfqActive {
+                system_order_type, ..
+            } => {
+                assert_eq!(
+                    system_order_type,
+                    Some(SystemOrderType::CollateralConversion)
+                );
+            }
+            _ => panic!("Expected RfqActive"),
+        }
     }
 }

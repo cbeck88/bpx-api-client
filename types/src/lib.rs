@@ -18,6 +18,7 @@ pub mod order;
 pub mod rfq;
 pub mod trade;
 pub mod user;
+pub mod vault;
 
 #[derive(
     Debug,
@@ -33,8 +34,6 @@ pub mod user;
     Hash,
     EnumIter,
 )]
-#[strum(serialize_all = "PascalCase")]
-#[serde(rename_all = "PascalCase")]
 pub enum Blockchain {
     #[default]
     Solana,
@@ -65,5 +64,10 @@ pub enum Blockchain {
     #[serde(rename = "0G")]
     ZeroG,
     Eclipse,
+    Fogo,
     Monad,
+    Stable,
+    Zcash,
+    #[serde(other)]
+    Unknown,
 }

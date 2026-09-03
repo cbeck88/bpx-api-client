@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::Blockchain;
+use crate::{Blockchain, margin::MarginFunction};
 
 /// An asset is most of the time a crypto coin that can have multiple representations
 /// across different blockchains. For example, USDT.
@@ -83,8 +83,33 @@ pub struct Market {
     /// The type of the market. Can be `SPOT`, `PERP`, `IPERP`, `DATED`, `PREDICTION`, `RFQ` or `MONAD`.
     /// New market types may also be added in the future.
     pub market_type: String,
+    /// The real-world-asset type backing the market, when the market is a
+    /// tokenized RWA (e.g. `STOCK` for tokenized equities such as
+    /// `SPCX.US_USDC`). `None` for regular crypto markets.
+    #[serde(default)]
+    pub rwa_market_type: Option<RwaMarketType>,
     /// See [`MarketFilters`].
     pub filters: MarketFilters,
+    /// IMF function.
+    pub imf_function: Option<MarginFunction>,
+    /// MMF function.
+    pub mmf_function: Option<MarginFunction>,
+    /// Funding interval for perpetuals in milliseconds.
+    pub funding_interval: Option<u64>,
+    /// Funding rate upper bound for perpetual markets, in basis points (e.g. `10` = 10 bps).
+    pub funding_rate_upper_bound: Option<Decimal>,
+    /// Funding rate lower bound for perpetual markets, in basis points (e.g. `-10` = -10 bps).
+    pub funding_rate_lower_bound: Option<Decimal>,
+    /// Maximum open interest limit for the market, when applicable.
+    pub open_interest_limit: Option<Decimal>,
+    /// Current state of the market's order book.
+    pub order_book_state: OrderBookState,
+    /// Market created at time.
+    pub created_at: chrono::NaiveDateTime,
+    /// Whether the market is currently listed/visible on the exchange.
+    pub visible: bool,
+    /// Position limit weight coefficient used when clearing trades.
+    pub position_limit_weight: Option<Decimal>,
 }
 
 impl Market {
@@ -101,6 +126,72 @@ impl Market {
     pub const fn quantity_decimal_places(&self) -> u32 {
         self.filters.quantity.step_size.scale()
     }
+}
+
+/// The state of a market's order book.
+///
+/// New states may be added by the exchange in the future; unrecognized values
+/// deserialize to [`OrderBookState::Unknown`].
+#[derive(
+    Debug,
+    strum::Display,
+    Clone,
+    Copy,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::EnumString,
+    PartialEq,
+    Eq,
+    Hash,
+)]
+#[strum(serialize_all = "PascalCase")]
+#[serde(rename_all = "PascalCase")]
+pub enum OrderBookState {
+    /// Normal operation: accepting and matching orders.
+    Open,
+    /// Not accepting any orders.
+    Closed,
+    /// Only cancellation of existing orders; no execution.
+    CancelOnly,
+    /// Only accepting limit orders.
+    LimitOnly,
+    /// Only accepting orders that would not immediately match.
+    PostOnly,
+    /// Any state not recognized by this client version.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The type of real-world asset backing a tokenized RWA market.
+///
+/// New types may be added by the exchange in the future; unrecognized values
+/// deserialize to [`RwaMarketType::Unknown`].
+#[derive(
+    Debug,
+    strum::Display,
+    Clone,
+    Copy,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::EnumString,
+    PartialEq,
+    Eq,
+    Hash,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RwaMarketType {
+    /// A tokenized equity.
+    Stock,
+    /// A tokenized index.
+    Index,
+    /// A tokenized commodity.
+    Commodity,
+    /// A tokenized foreign-exchange pair.
+    Fx,
+    /// Any type not recognized by this client version.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,12 +227,21 @@ pub struct PriceFilter {
     /// Price band for futures markets. Restricts the premium moving too far
     /// from the mean premium.
     pub mean_premium_band: Option<PriceBandPremium>,
+    /// RWA price band restricting how far the price may move from the latest
+    /// external oracle price.
+    pub discovery_bound_band: Option<PriceBandDiscoveryBound>,
     /// Maximum allowed multiplier move from last active price without
     /// incurring an entry fee when borrowing for spot margin.
     pub borrow_entry_fee_max_multiplier: Option<Decimal>,
     /// Minimum allowed multiplier move from last active price without
     /// incurring an entry fee when borrowing for spot margin.
     pub borrow_entry_fee_min_multiplier: Option<Decimal>,
+    /// Maximum allowed multiplier for mark/index price updates relative to the
+    /// previous mark/index price.
+    pub max_price_update_multiplier: Option<Decimal>,
+    /// Minimum allowed multiplier for mark/index price updates relative to the
+    /// previous mark/index price.
+    pub min_price_update_multiplier: Option<Decimal>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,6 +269,15 @@ pub struct PriceBandPremium {
     /// orders will be prevented from being placed if the premium exceeds 10%.
     /// User to calculate `min_premium_pct` and `max_premium_pct`.
     pub tolerance_pct: Decimal,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceBandDiscoveryBound {
+    /// Maximum allowed multiplier move from the external oracle price.
+    pub max_multiplier: Decimal,
+    /// Minimum allowed multiplier move from the external oracle price.
+    pub min_multiplier: Decimal,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -398,6 +507,34 @@ pub struct MarkPriceUpdate {
     pub engine_timestamp: i64,
 }
 
+/// A tradable equity security.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Security {
+    /// Asset symbol.
+    pub asset: String,
+    /// CUSIP identifier for the security.
+    pub cusip: Option<String>,
+    /// Name.
+    pub name: String,
+    /// Trading sessions, each with their own quantity limits.
+    pub sessions: Vec<SecuritySession>,
+}
+
+/// Trading session limits for a [`Security`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecuritySession {
+    /// Session name (e.g. `US_EQUITIES_REGULAR`).
+    pub name: String,
+    /// Minimum order quantity for this session.
+    pub min_quantity: Decimal,
+    /// Maximum order quantity for this session.
+    pub max_quantity: Option<Decimal>,
+    /// Minimum quantity increment for this session.
+    pub step_size: Decimal,
+}
+
 impl TryFrom<u32> for OrderBookDepthLimit {
     type Error = &'static str;
 
@@ -468,6 +605,7 @@ mod test {
             base_symbol: "TEST".to_string(),
             quote_symbol: "MARKET".to_string(),
             market_type: "SPOT".to_string(),
+            rwa_market_type: None,
             filters: super::MarketFilters {
                 price: PriceFilter {
                     min_price: dec!(0.0001),
@@ -479,8 +617,11 @@ mod test {
                     min_impact_multiplier: Some(dec!(0.95)),
                     mean_mark_price_band: None,
                     mean_premium_band: None,
+                    discovery_bound_band: None,
                     borrow_entry_fee_max_multiplier: None,
                     borrow_entry_fee_min_multiplier: None,
+                    max_price_update_multiplier: None,
+                    min_price_update_multiplier: None,
                 },
                 quantity: QuantityFilter {
                     min_quantity: dec!(0.01),
@@ -489,6 +630,20 @@ mod test {
                 },
                 leverage: None,
             },
+            imf_function: None,
+            mmf_function: None,
+            funding_interval: None,
+            funding_rate_upper_bound: None,
+            funding_rate_lower_bound: None,
+            open_interest_limit: None,
+            order_book_state: OrderBookState::Open,
+            created_at: chrono::NaiveDateTime::parse_from_str(
+                "2025-01-21T06:34:54.691858",
+                "%Y-%m-%dT%H:%M:%S%.f",
+            )
+            .unwrap(),
+            visible: true,
+            position_limit_weight: None,
         }
     }
 
@@ -581,5 +736,157 @@ mod test {
 
         let depth: OrderBookDepth = serde_json::from_str(data).unwrap();
         assert_eq!(depth.last_update_id, 94978271);
+    }
+
+    #[test]
+    fn test_market_order_book_state_and_visible_parse() {
+        let data = r#"
+{
+  "symbol": "WEN_USDC",
+  "baseSymbol": "WEN",
+  "quoteSymbol": "USDC",
+  "marketType": "SPOT",
+  "filters": {
+    "price": { "minPrice": "0.0001", "tickSize": "0.0001" },
+    "quantity": { "minQuantity": "0.01", "stepSize": "0.01" }
+  },
+  "orderBookState": "Closed",
+  "createdAt": "2025-01-21T06:34:54.691858",
+  "visible": false
+}
+        "#;
+
+        let market: Market = serde_json::from_str(data).unwrap();
+        assert_eq!(market.order_book_state, OrderBookState::Closed);
+        assert!(!market.visible);
+
+        // Unrecognized states fall back to `Unknown` rather than failing the parse.
+        let unknown = data.replace("\"Closed\"", "\"SomeFutureState\"");
+        let market: Market = serde_json::from_str(&unknown).unwrap();
+        assert_eq!(market.order_book_state, OrderBookState::Unknown);
+    }
+
+    #[test]
+    fn test_market_rwa_market_type_parse() {
+        let data = r#"
+{
+  "symbol": "SPCX.US_USDC",
+  "baseSymbol": "SPCX.US",
+  "quoteSymbol": "USDC",
+  "marketType": "SPOT",
+  "rwaMarketType": "STOCK",
+  "filters": {
+    "price": { "minPrice": "0.01", "tickSize": "0.01" },
+    "quantity": { "minQuantity": "0.01", "stepSize": "0.01" }
+  },
+  "orderBookState": "PostOnly",
+  "createdAt": "2025-01-21T06:34:54.691858",
+  "visible": false
+}
+        "#;
+
+        let market: Market = serde_json::from_str(data).unwrap();
+        assert_eq!(market.rwa_market_type, Some(RwaMarketType::Stock));
+
+        // The exchange's full RWA set: STOCK, INDEX, COMMODITY, FX.
+        for (wire, expected) in [
+            ("INDEX", RwaMarketType::Index),
+            ("COMMODITY", RwaMarketType::Commodity),
+            ("FX", RwaMarketType::Fx),
+        ] {
+            let payload = data.replace("STOCK", wire);
+            let market: Market = serde_json::from_str(&payload).unwrap();
+            assert_eq!(market.rwa_market_type, Some(expected));
+        }
+
+        // Explicit null parses to `None`, as the API sends for crypto markets.
+        let null = data.replace("\"STOCK\"", "null");
+        let market: Market = serde_json::from_str(&null).unwrap();
+        assert_eq!(market.rwa_market_type, None);
+
+        // An absent key parses to `None` for responses predating the field.
+        let absent = data.replace("\"rwaMarketType\": \"STOCK\",", "");
+        let market: Market = serde_json::from_str(&absent).unwrap();
+        assert_eq!(market.rwa_market_type, None);
+
+        // Unrecognized types fall back to `Unknown` rather than failing the parse.
+        let unknown = data.replace("\"STOCK\"", "\"SOME_FUTURE_RWA\"");
+        let market: Market = serde_json::from_str(&unknown).unwrap();
+        assert_eq!(market.rwa_market_type, Some(RwaMarketType::Unknown));
+    }
+
+    #[test]
+    fn test_market_perp_fields_parse() {
+        let data = r#"
+{
+  "baseSymbol": "SOL",
+  "createdAt": "2025-01-21T06:34:54.691858",
+  "filters": {
+    "price": {
+      "borrowEntryFeeMaxMultiplier": null,
+      "borrowEntryFeeMinMultiplier": null,
+      "maxImpactMultiplier": "1.01",
+      "maxMultiplier": "2",
+      "maxPrice": "1000",
+      "meanMarkPriceBand": {
+        "maxMultiplier": "1.1",
+        "minMultiplier": "0.9"
+      },
+      "meanPremiumBand": {
+        "tolerancePct": "0.05"
+      },
+      "minImpactMultiplier": "0.99",
+      "minMultiplier": "0.25",
+      "minPrice": "0.01",
+      "tickSize": "0.01"
+    },
+    "quantity": {
+      "maxQuantity": null,
+      "minQuantity": "0.01",
+      "stepSize": "0.01"
+    }
+  },
+  "fundingInterval": 3600000,
+  "fundingRateLowerBound": "-100",
+  "fundingRateUpperBound": "100",
+  "imfFunction": {
+    "base": "0.02",
+    "factor": "0.00006",
+    "type": "sqrt"
+  },
+  "marketType": "PERP",
+  "mmfFunction": {
+    "base": "0.0135",
+    "factor": "0.000036",
+    "type": "sqrt"
+  },
+  "openInterestLimit": "4000000",
+  "orderBookState": "Open",
+  "positionLimitWeight": "1",
+  "quoteSymbol": "USDC",
+  "symbol": "SOL_USDC_PERP",
+  "visible": true
+}
+        "#;
+
+        let market: Market = serde_json::from_str(data).unwrap();
+        assert_eq!(market.symbol, "SOL_USDC_PERP");
+        assert_eq!(market.funding_interval, Some(3600000));
+        assert_eq!(market.funding_rate_lower_bound, Some(dec!(-100)));
+        assert_eq!(market.funding_rate_upper_bound, Some(dec!(100)));
+        assert_eq!(market.open_interest_limit, Some(dec!(4000000)));
+        assert_eq!(market.position_limit_weight, Some(dec!(1)));
+        assert_eq!(market.imf_function.as_ref().unwrap().function_type, "sqrt");
+        assert_eq!(market.imf_function.as_ref().unwrap().base, dec!(0.02));
+        assert_eq!(
+            market
+                .filters
+                .price
+                .mean_premium_band
+                .as_ref()
+                .unwrap()
+                .tolerance_pct,
+            dec!(0.05)
+        );
     }
 }
