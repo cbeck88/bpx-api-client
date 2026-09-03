@@ -16,6 +16,6 @@ impl BpxClient {
     ) -> Result<RequestTwoFactorResponse> {
         let endpoint = self.base_url.join(API_USER_2FA)?;
         let res = self.post(endpoint, payload).await?;
-        Self::json_with_context(res).await
+        Self::deserialize_json(res).await
     }
 }

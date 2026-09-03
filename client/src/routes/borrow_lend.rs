@@ -10,6 +10,6 @@ impl BpxClient {
     pub async fn get_borrow_lend_positions(&self) -> Result<Vec<BorrowLendPosition>> {
         let url = self.base_url.join(API_BORROW_LEND_POSITIONS)?;
         let res = self.get(url).await?;
-        Self::json_with_context(res).await
+        Self::deserialize_json(res).await
     }
 }

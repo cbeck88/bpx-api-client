@@ -177,29 +177,21 @@ impl BpxClient {
         Ok(res)
     }
 
-    /// Deserializes the response body as JSON, logging the body at error level on failure.
+    /// Deserializes the response body as JSON.
     ///
-    /// Unlike `Response::json()`, this method captures the response body and logs it
-    /// if deserialization fails, making it easier to debug API changes.
-    pub async fn json_with_context<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
+    /// Unlike `Response::json()`, this reads the body as text first so that a
+    /// deserialization failure can carry the body in [`Error::Deserialize`],
+    /// making it easier to debug API changes.
+    pub(crate) async fn deserialize_json<T: serde::de::DeserializeOwned>(
+        res: Response,
+    ) -> Result<T> {
         let body = res.text().await?;
-        serde_json::from_str(&body).map_err(|error| {
-            // Truncate very long responses for readability in logs
-            let body_preview = if body.len() > 2000 {
-                format!(
-                    "{}...[truncated, {} bytes total]",
-                    &body[..2000],
-                    body.len()
-                )
-            } else {
-                body
-            };
-            tracing::error!(
-                %error,
-                body_preview,
-                "Failed to deserialize API response"
-            );
-            error.into()
+        serde_json::from_str(&body).map_err(|source| {
+            tracing::debug!(%source, body, "Failed to deserialize API response");
+            Error::Deserialize {
+                source,
+                body: body.into(),
+            }
         })
     }
 

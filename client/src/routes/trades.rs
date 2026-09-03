@@ -18,7 +18,7 @@ impl BpxClient {
             }
         }
         let res = self.get(url).await?;
-        Self::json_with_context(res).await
+        Self::deserialize_json(res).await
     }
 
     /// Fetches historical trades for a given symbol, with optional limit and offset.
@@ -40,6 +40,6 @@ impl BpxClient {
             }
         }
         let res = self.get(url).await?;
-        Self::json_with_context(res).await
+        Self::deserialize_json(res).await
     }
 }
